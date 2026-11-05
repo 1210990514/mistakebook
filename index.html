@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#2f6fed">
+  <title>错题集</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+  <div id="app" v-cloak>
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <h1>错题集</h1>
+      <span class="badge" v-if="dueCount > 0">{{ dueCount }} 题待复习</span>
+    </header>
+
+    <!-- 页面内容 -->
+    <main class="content">
+
+      <!-- ========== 添加页 ========== -->
+      <section v-show="tab === 'add'" class="page">
+        <div class="card">
+          <div class="photo-grid">
+            <div class="photo-item" v-for="(p, i) in draft.photos" :key="i">
+              <img :src="p.url" alt="">
+              <button class="photo-remove" @click="removeDraftPhoto(i)">×</button>
+              <div class="ocr-state" v-if="p.ocrState">{{ p.ocrState }}</div>
+            </div>
+            <label class="photo-add" v-if="draft.photos.length < 6">
+              <input type="file" accept="image/*" capture="environment" @change="onCameraPick">
+              <span>📷<br>拍照</span>
+            </label>
+            <label class="photo-add" v-if="draft.photos.length < 6">
+              <input type="file" accept="image/*" multiple @change="onGalleryPick">
+              <span>🖼️<br>相册</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <label class="field">
+            <span>科目</span>
+            <div class="chips" v-if="subjects.length">
+              <button v-for="s in subjects" :key="s" class="chip"
+                      :class="{ active: draft.subject === s }"
+                      @click="draft.subject = s">{{ s }}</button>
+              <input v-model="newSubject" placeholder="+ 新科目" class="chip-input"
+                     @keyup.enter="addSubject">
+            </div>
+            <div class="chips" v-else>
+              <input v-model="newSubject" placeholder="例如：数学" class="chip-input">
+              <button class="chip" @click="addSubject" :disabled="!newSubject.trim()">确定</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>知识点标签（逗号分隔）</span>
+            <input v-model="draft.tagsText" placeholder="例如：二次函数, 图像变换">
+          </label>
+
+          <label class="field">
+            <span>错因 / 备注</span>
+            <textarea v-model="draft.note" rows="3" placeholder="哪里错了？正确的思路是什么？"></textarea>
+          </label>
+
+          <label class="field">
+            <span>题目文字（识别结果可修改）</span>
+            <textarea v-model="draft.text" rows="3" placeholder="拍照后自动 OCR 识别，也可手动输入"></textarea>
+          </label>
+
+          <button class="btn primary block" :disabled="!canSave || saving" @click="saveDraft">
+            {{ saving ? '保存中…' : '保存错题' }}
+          </button>
+        </div>
+      </section>
+
+      <!-- ========== 列表页 ========== -->
+      <section v-show="tab === 'list'" class="page">
+        <div class="filter-bar">
+          <select v-model="filterSubject">
+            <option value="">全部科目</option>
+            <option v-for="s in subjects" :key="s" :value="s">{{ s }}</option>
+          </select>
+          <select v-model="filterStatus">
+            <option value="">全部状态</option>
+            <option value="new">未复习</option>
+            <option value="learning">复习中</option>
+            <option value="mastered">已掌握</option>
+          </select>
+        </div>
+        <div class="filter-bar">
+          <input v-model="searchText" placeholder="🔍 搜索题目文字 / 标签 / 备注">
+        </div>
+
+        <div class="empty" v-if="!filteredItems.length">还没有错题，去「添加」页拍一张吧</div>
+
+        <div class="card item" v-for="m in filteredItems" :key="m.id" @click="openDetail(m)">
+          <div class="item-top">
+            <span class="tag subject">{{ m.subject }}</span>
+            <span class="tag" :class="'st-' + m.status">{{ statusLabel(m.status) }}</span>
+            <span class="spacer"></span>
+            <span class="date">{{ fmtDate(m.createdAt) }}</span>
+          </div>
+          <div class="item-thumbs" v-if="m._thumbs.length">
+            <img v-for="(t, i) in m._thumbs" :key="i" :src="t" alt="">
+          </div>
+          <p class="item-text" v-if="m.text">{{ m.text }}</p>
+          <p class="item-text muted" v-else-if="m.note">{{ m.note }}</p>
+          <div class="item-tags" v-if="m.tags && m.tags.length">
+            <span class="tag gray" v-for="t in m.tags" :key="t"># {{ t }}</span>
+          </div>
+          <div class="item-next" v-if="m.status !== 'mastered' && m.nextReviewAt">
+            下次复习：{{ fmtDate(m.nextReviewAt) }}
+          </div>
+        </div>
+      </section>
+
+      <!-- ========== 复习页 ========== -->
+      <section v-show="tab === 'review'" class="page">
+        <div v-if="!reviewQueue.length" class="empty">
+          <template v-if="reviewDone > 0">🎉 今日复习完成（{{ reviewDone }} 题）</template>
+          <template v-else>暂无到期需要复习的错题</template>
+          <div class="muted small" v-if="dueCount === 0 && reviewCountdown">
+            下一题到期：{{ reviewCountdown }}
+          </div>
+        </div>
+
+        <div v-else class="card review-card">
+          <div class="item-top">
+            <span class="tag subject">{{ current.subject }}</span>
+            <span class="tag gray" v-for="t in current.tags" :key="t"># {{ t }}</span>
+            <span class="spacer"></span>
+            <span class="date">第 {{ current.intervalIdx + 1 }} / 6 轮</span>
+          </div>
+
+          <div class="review-photos">
+            <img v-for="(p, i) in currentPhotos" :key="i" :src="p" alt="" @click="fullscreen(p)">
+          </div>
+
+          <p class="item-text" v-if="current.text">{{ current.text }}</p>
+
+          <template v-if="!showAnswer">
+            <button class="btn primary block" @click="showAnswer = true">我看完了 / 对答案</button>
+          </template>
+          <template v-else>
+            <div class="answer-area" v-if="current.note">
+              <b>错因与备注：</b>{{ current.note }}
+            </div>
+            <div class="row">
+              <button class="btn danger" @click="judge(false)">❌ 又做错了</button>
+              <button class="btn success" @click="judge(true)">✅ 做对了</button>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- ========== 设置页 ========== -->
+      <section v-show="tab === 'settings'" class="page">
+        <div class="card">
+          <h3>数据备份</h3>
+          <p class="muted small">换手机或清理浏览器数据前，请先导出备份文件；导入会将备份内容追加到当前数据库。</p>
+          <div class="row">
+            <button class="btn primary" @click="exportBackup" :disabled="backingUp">
+              {{ backingUp ? '导出中…' : '导出备份' }}
+            </button>
+            <label class="btn">
+              导入备份
+              <input type="file" accept="application/json,.json" hidden @change="importBackup">
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>OCR 设置</h3>
+          <label class="field row-line">
+            <span>拍照后自动识别题目文字</span>
+            <input type="checkbox" v-model="autoOcr">
+          </label>
+          <p class="muted small">识别引擎首次使用需联网下载语言包（约几 MB，之后走缓存）。印刷体识别较好，手写体识别率有限。</p>
+        </div>
+
+        <div class="card">
+          <h3>科目管理</h3>
+          <div class="chips">
+            <button class="chip" v-for="s in subjects" :key="s" @click="renameSubjectPrompt(s)">
+              {{ s }}
+            </button>
+          </div>
+          <p class="muted small">点击科目名可重命名。</p>
+        </div>
+
+        <div class="card">
+          <h3>关于</h3>
+          <p class="muted small">数据全部保存在本机的 IndexedDB 中，不上传任何服务器。可通过浏览器「添加到主屏幕」当作 App 使用。</p>
+          <button class="btn danger" @click="clearAll">清空全部数据</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- 底部导航 -->
+    <nav class="tabbar">
+      <button :class="{ on: tab === 'add' }" @click="tab = 'add'"><span>➕</span>添加</button>
+      <button :class="{ on: tab === 'list' }" @click="tab = 'list'; loadList()"><span>📚</span>错题</button>
+      <button :class="{ on: tab === 'review' }" @click="goReview"><span>🔁</span>复习<i v-if="dueCount" class="dot"></i></button>
+      <button :class="{ on: tab === 'settings' }" @click="tab = 'settings'"><span>⚙️</span>设置</button>
+    </nav>
+
+    <!-- 详情弹层 -->
+    <div class="modal" v-if="detail" @click.self="detail = null">
+      <div class="modal-body card">
+        <div class="item-top">
+          <span class="tag subject">{{ detail.subject }}</span>
+          <span class="tag" :class="'st-' + detail.status">{{ statusLabel(detail.status) }}</span>
+          <span class="spacer"></span>
+          <button class="btn small danger" @click="deleteMistake(detail)">删除</button>
+        </div>
+        <div class="review-photos">
+          <img v-for="(p, i) in detailPhotos" :key="i" :src="p" alt="" @click="fullscreen(p)">
+        </div>
+        <label class="field"><span>题目文字</span>
+          <textarea v-model="editBuf.text" rows="4"></textarea></label>
+        <label class="field"><span>错因 / 备注</span>
+          <textarea v-model="editBuf.note" rows="3"></textarea></label>
+        <label class="field"><span>标签（逗号分隔）</span>
+          <input v-model="editBuf.tagsText"></label>
+        <div class="row">
+          <button class="btn success" @click="saveDetail">保存修改</button>
+          <button class="btn" @click="detail = null">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 全屏看图片 -->
+    <div class="fullscreen" v-if="fullscreenUrl" @click="fullscreenUrl = null">
+      <img :src="fullscreenUrl" @click.stop>
+    </div>
+
+    <!-- toast -->
+    <transition name="fade">
+      <div class="toast" v-if="toast">{{ toast }}</div>
+    </transition>
+  </div>
+
+  <script src="./vendor/vue.global.prod.js"></script>
+  <script src="./vendor/dexie.min.js"></script>
+  <script src="./vendor/tesseract/tesseract.min.js"></script>
+  <script src="./js/db.js"></script>
+  <script src="./js/ocr.js"></script>
+  <script src="./js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost','127.0.0.1'].includes(location.hostname))) {
+      navigator.serviceWorker.register('./sw.js').catch(function () {});
+    }
+  </script>
+</body>
+</html>
